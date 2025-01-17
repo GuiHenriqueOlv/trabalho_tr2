@@ -1,4 +1,4 @@
-﻿import socket
+import socket
 import threading
 
 clients = {}
