@@ -1,75 +1,53 @@
-import socket
+import xmlrpc.client
+from xmlrpc.server import SimpleXMLRPCServer
 import threading
 
-def connect_to_server():
-    """Conecta ao servidor e gerencia a interação com o usuário."""
-    server_address = ('127.0.0.1', 5000)
-    buffer_size = 1024
+def connect_to_tracker(name):
+    server_address = 'http://localhost:8000'
+    with xmlrpc.client.ServerProxy(server_address) as proxy:
+        # Registrar no tracker
+        print(proxy.register(name, f"http://localhost:8001"))
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
-        client_socket.connect(server_address)
+        # Listar clientes conectados
+        clients = proxy.list_clients()
+        print("Peers conectados:", clients)
 
-        client_name = input("Digite seu nome de cliente: ")
-        client_socket.sendall(client_name.encode())
-        server_response = client_socket.recv(buffer_size).decode()
-        print(server_response)
+        # Função para receber mensagens
+        def receive_messages():
+            server = SimpleXMLRPCServer(('localhost', 8001))
+            server.register_function(receive_message, 'receive_message')
+            server.serve_forever()
 
+        # Inicia a thread para receber mensagens
+        threading.Thread(target=receive_messages, daemon=True).start()
+        
+        # Comandos de chat
         while True:
-            command = input("Digite um comando: 'list' para ver clientes, 'chat' para conversar com outro peer, 'exit' para sair.\n")
-            client_socket.sendall(command.encode())
-
+            command = input("Digite 'list' para ver peers, 'chat' para conversar, 'exit' para sair: ")
             if command == 'list':
-                response = client_socket.recv(buffer_size).decode()
-                print(f"Peers conectados: {response}")
+                print(proxy.list_clients())
             elif command == 'chat':
                 peer_name = input("Digite o nome do peer para iniciar o chat: ")
-                client_socket.sendall(peer_name.encode())
-
-                response = client_socket.recv(buffer_size).decode()
-                if "não encontrado" in response:
-                    print(response)
-                elif "aceitou" in response:
-                    print(f"Conectando-se com {peer_name}...")
-                    start_chat(client_socket, peer_name, buffer_size, response)
-                elif "recusou" in response:
-                    print(f"{peer_name} recusou seu pedido de chat.")
+                peer_address = proxy.get_peer_address(peer_name)
+                if peer_address == "Peer não encontrado.":
+                    print(peer_address)
+                else:
+                    chat_with_peer(peer_name, peer_address)
             elif command == 'exit':
                 break
-            else:
-                print("Comando não reconhecido. Tente novamente.")
 
-def start_chat(client_socket, peer_name, buffer_size, peer_address):
-    """Gerencia a troca de mensagens com o peer."""
-    
-    # Extrai o IP e a porta do peer
-    peer_ip, peer_port = peer_address.split(":")
-    peer_port = int(peer_port)
-    
-    # Função para enviar mensagens
-    def send_messages(peer_socket):
+def receive_message(message, from_peer):
+    print(f"{from_peer}: {message}")
+    return True
+
+def chat_with_peer(peer_name, peer_address):
+    with xmlrpc.client.ServerProxy(peer_address) as peer_proxy:
         while True:
-            msg = input("Você: ")
-            peer_socket.sendall(msg.encode())
-            if msg.lower() == 'exit':
+            message = input("Você: ")
+            if message.lower() == 'exit':
                 break
-
-    # Função para receber mensagens
-    def receive_messages(peer_socket):
-        while True:
-            msg = peer_socket.recv(buffer_size).decode().strip()
-            if msg.lower() == 'exit' or not msg:
-                print(f"{peer_name} saiu do chat.")
-                break
-            print(f"{peer_name}: {msg}")
-
-    # Criando socket de escuta para o peer
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as peer_socket:
-        peer_socket.connect((peer_ip, peer_port))
-        print(f"Conectado com {peer_name}.")
-
-        # Criando threads para enviar e receber mensagens simultaneamente
-        threading.Thread(target=send_messages, args=(peer_socket,), daemon=True).start()
-        threading.Thread(target=receive_messages, args=(peer_socket,), daemon=True).start()
+            peer_proxy.receive_message(message, "Seu_Nome")
 
 if __name__ == "__main__":
-    connect_to_server()
+    name = input("Digite seu nome de cliente: ")
+    connect_to_tracker(name)
