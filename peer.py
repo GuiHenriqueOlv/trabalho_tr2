@@ -2,30 +2,44 @@ from xmlrpc.server import SimpleXMLRPCServer
 import xmlrpc.client
 import threading
 import time
+import random
+
+# Assign a unique port for each peer
+PORT = random.randint(10000, 60000)
+
+def receive_message(message, from_peer):
+    print(f"{from_peer}: {message}")
+    return True
+
+def chat_with_peer(peer_name, peer_address, sender_name):
+    with xmlrpc.client.ServerProxy(peer_address) as peer_proxy:
+        while True:
+            message = input(f"{sender_name} (Você): ")
+            if message.lower() == 'exit':
+                break
+            peer_proxy.receive_message(message, sender_name)
 
 def connect_to_tracker(name):
     server_address = 'http://localhost:9000'
     with xmlrpc.client.ServerProxy(server_address) as proxy:
         # Register with the tracker
-        print(proxy.register(name, f"http://localhost:9001"))
+        print(proxy.register(name, f"http://localhost:{PORT}"))
 
-        # Start a heartbeat thread
+        # Start a thread to send heartbeats
         def send_heartbeat():
             while True:
-                try:
-                    print(proxy.heartbeat(name))
-                except Exception as e:
-                    print(f"Erro ao enviar heartbeat: {e}")
                 time.sleep(5)  # Send heartbeat every 5 seconds
+                print(proxy.heartbeat(name))
 
         threading.Thread(target=send_heartbeat, daemon=True).start()
 
-        # Start receiving messages
+        # Function to receive messages
         def receive_messages():
-            server = SimpleXMLRPCServer(('localhost', 9001))
+            server = SimpleXMLRPCServer(('localhost', PORT), allow_none=True)
             server.register_function(receive_message, 'receive_message')
             server.serve_forever()
 
+        # Start a thread to receive messages
         threading.Thread(target=receive_messages, daemon=True).start()
 
         # Chat commands
@@ -39,21 +53,9 @@ def connect_to_tracker(name):
                 if peer_address == "Peer não encontrado.":
                     print(peer_address)
                 else:
-                    chat_with_peer(peer_name, peer_address)
+                    chat_with_peer(peer_name, peer_address, name)
             elif command == 'exit':
                 break
-
-def receive_message(message, from_peer):
-    print(f"{from_peer}: {message}")
-    return True
-
-def chat_with_peer(peer_name, peer_address):
-    with xmlrpc.client.ServerProxy(peer_address) as peer_proxy:
-        while True:
-            message = input("Você: ")
-            if message.lower() == 'exit':
-                break
-            peer_proxy.receive_message(message, "Seu_Nome")
 
 if __name__ == "__main__":
     name = input("Digite seu nome de cliente: ")
