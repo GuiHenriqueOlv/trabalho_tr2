@@ -14,6 +14,7 @@ def list_clients():
     # Remove clients that haven't sent a heartbeat in the last 10 seconds
     for name in list(heartbeat_status.keys()):
         if time.time() - heartbeat_status[name] > 10:
+            print(f"O peer {name} foi removido.")  # Print the message
             del clients[name]
             del heartbeat_status[name]
     return clients
@@ -28,6 +29,11 @@ def heartbeat(name):
     else:
         return "Peer not registered."
 
+def monitor_heartbeat():
+    while True:
+        list_clients()  # Check for disconnected peers every 5 seconds
+        time.sleep(5)
+
 def start_server():
     server = SimpleXMLRPCServer(('localhost', 9000))
     server.register_function(register, 'register')
@@ -38,6 +44,10 @@ def start_server():
     server.serve_forever()
 
 if __name__ == "__main__":
+    # Start the heartbeat monitoring thread
+    heartbeat_thread = threading.Thread(target=monitor_heartbeat, daemon=True)
+    heartbeat_thread.start()
+
     # Start the server in a separate thread
     server_thread = threading.Thread(target=start_server, daemon=True)
     server_thread.start()
