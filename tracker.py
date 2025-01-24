@@ -4,16 +4,21 @@ import time
 
 clients = {}
 heartbeat_status = {}
+heart = 30  # Heartbeat timeout in seconds
 
 def register(name, address):
-    clients[name] = address
-    heartbeat_status[name] = time.time()  # Record the heartbeat timestamp
-    return f"{name} registrado com sucesso."
+    # Check if the name is already registered
+    if name in clients:
+        return f"Error: O nome '{name}' já está em uso. Escolha outro."
+    else:
+        clients[name] = address
+        heartbeat_status[name] = time.time()  # Record the heartbeat timestamp
+        return f"{name} registrado com sucesso."
 
 def list_clients():
-    # Remove clients that haven't sent a heartbeat in the last 10 seconds
+    # Remove clients that haven't sent a heartbeat in the last 30 seconds
     for name in list(heartbeat_status.keys()):
-        if time.time() - heartbeat_status[name] > 10:
+        if time.time() - heartbeat_status[name] > heart:
             print(f"O peer {name} foi removido.")  # Print the message
             del clients[name]
             del heartbeat_status[name]
@@ -25,14 +30,14 @@ def get_peer_address(name):
 def heartbeat(name):
     if name in heartbeat_status:
         heartbeat_status[name] = time.time()
-        return f"Heartbeat received from {name}."
+        return True
     else:
-        return "Peer not registered."
+        return False
 
 def monitor_heartbeat():
     while True:
-        list_clients()  # Check for disconnected peers every 5 seconds
-        time.sleep(5)
+        list_clients()  # Check for disconnected peers
+        time.sleep(heart)
 
 def start_server():
     server = SimpleXMLRPCServer(('localhost', 9000))
@@ -48,13 +53,8 @@ if __name__ == "__main__":
     heartbeat_thread = threading.Thread(target=monitor_heartbeat, daemon=True)
     heartbeat_thread.start()
 
-    # Start the server in a separate thread
-    server_thread = threading.Thread(target=start_server, daemon=True)
-    server_thread.start()
-
-    # Keep the main thread alive
+    # Start the server
     try:
-        print("Pressione Ctrl+C para encerrar o servidor.")
-        threading.Event().wait()
+        start_server()
     except KeyboardInterrupt:
         print("Servidor interrompido.")
