@@ -5,27 +5,29 @@ import time
 import random
 import os
 
-# Assign a unique port for each peer
+# Define uma porta única para cada peer
 PORT = random.randint(10000, 60000)
-
-# Global flag to manage the main loop
+# Flag global para gerenciar o loop principal
 exit_flag = threading.Event()
 
 
 def receive_message(message, from_peer):
+    # Função para receber mensagens de outro peer
     print(f"\n{from_peer}: {message}")
     return True
 
 
 def get_files():
-    # List files in the current directory for this peer
+    # Lista os arquivos no diretório atual que terminam com .txt
     return [f for f in os.listdir() if f.endswith(".txt")]
 
 
 def send_file(file_name):
+    # Envia um arquivo solicitado para outro peer
     try:
         with open(file_name, "rb") as f:
             data = f.read()
+        print(f"Arquivo '{file_name}' enviado com sucesso.")
         return xmlrpc.client.Binary(data)
     except FileNotFoundError:
         return f"Error: Arquivo '{file_name}' não encontrado."
@@ -34,14 +36,23 @@ def send_file(file_name):
 
 
 def download_file(peer_name, peer_address, file_name):
+    # Faz o download de um arquivo de outro peer
     try:
         with xmlrpc.client.ServerProxy(peer_address) as peer_proxy:
+            start_time = time.time()  # Marca o início do tempo de download
             response = peer_proxy.send_file(file_name)
             if isinstance(response, xmlrpc.client.Binary):
-                # Save the file locally
+                # Salva o arquivo localmente
                 with open(file_name, "wb") as f:
                     f.write(response.data)
+                end_time = time.time()  # Marca o fim do tempo de download
+
+                # Calcula o tamanho do arquivo em MB e a taxa de download
+                file_size = len(response.data) / (1024 * 1024)  # Tamanho em MB
+                download_rate = file_size / (end_time - start_time)  # MB/s
+                
                 print(f"Arquivo '{file_name}' baixado com sucesso de {peer_name}.")
+                print(f"Tamanho do arquivo: {file_size:.2f} MB, Taxa de download: {download_rate:.2f} MB/s")
             else:
                 print(response)
     except Exception as e:
@@ -49,6 +60,7 @@ def download_file(peer_name, peer_address, file_name):
 
 
 def chat_with_peer(peer_name, peer_address, sender_name):
+    # Função para conversar com outro peer
     try:
         with xmlrpc.client.ServerProxy(peer_address) as peer_proxy:
             while not exit_flag.is_set():
@@ -62,6 +74,7 @@ def chat_with_peer(peer_name, peer_address, sender_name):
 
 
 def list_files_from_peers(proxy):
+    # Lista os arquivos compartilhados por outros peers
     try:
         peers = proxy.list_clients()
         if not peers:
@@ -81,10 +94,10 @@ def list_files_from_peers(proxy):
 
 
 def connect_to_tracker(name):
+    # Conecta ao tracker e registra o peer
     server_address = 'http://localhost:9000'
     try:
         with xmlrpc.client.ServerProxy(server_address) as proxy:
-            # Attempt to register with the tracker
             response = proxy.register(name, f"http://localhost:{PORT}")
             if response.startswith("Error:"):
                 print(response)
@@ -92,16 +105,16 @@ def connect_to_tracker(name):
 
             print(response)
 
-            # Create a local file for the peer
+            # Cria um arquivo local para o peer
             file_name = f"{name}_example.txt"
             with open(file_name, "w") as f:
-                f.write(f"This is a file for peer {name}.\n")
+                f.write(f"Este é um arquivo para o peer {name}.")
             print(f"Arquivo '{file_name}' criado localmente.")
 
-            # Start a thread to send heartbeats
+            # Inicia uma thread para enviar heartbeats periodicamente
             def send_heartbeat():
                 while not exit_flag.is_set():
-                    time.sleep(10)  # Send heartbeat every 10 seconds
+                    time.sleep(10)  # Envia heartbeat a cada 10 segundos
                     try:
                         proxy.heartbeat(name)
                     except Exception as e:
@@ -110,18 +123,18 @@ def connect_to_tracker(name):
 
             threading.Thread(target=send_heartbeat, daemon=True).start()
 
-            # Function to receive messages
+            # Função para receber mensagens
             def receive_messages():
                 server = SimpleXMLRPCServer(('localhost', PORT), allow_none=True)
                 server.register_function(receive_message, 'receive_message')
                 server.register_function(get_files, 'get_files')
-                server.register_function(send_file, 'send_file')  # Register file transfer function
+                server.register_function(send_file, 'send_file')  # Registra função de envio de arquivos
                 print(f"Peer iniciado no endereço http://localhost:{PORT}.")
                 server.serve_forever()
 
             threading.Thread(target=receive_messages, daemon=True).start()
 
-            # Chat commands
+            # Comandos do chat
             while not exit_flag.is_set():
                 command = input("\nDigite 'list' para ver peers, 'chat' para conversar, 'get' para baixar arquivo, 'exit' para sair: ").strip().lower()
                 if command == 'list':
