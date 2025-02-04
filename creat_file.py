@@ -22,4 +22,4 @@ def create_big_text_file(filename, size_in_mb):
     print(f"Arquivo '{filename}' criado com sucesso, com aproximadamente {size_in_mb} MB.")
 
 # Criar um arquivo de 50 MB
-create_big_text_file("bigfile.txt", 50)
+create_big_text_file("bigfile.txt", 100)
