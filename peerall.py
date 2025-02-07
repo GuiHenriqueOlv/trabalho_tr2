@@ -1,41 +1,48 @@
 from xmlrpc.server import SimpleXMLRPCServer
 import xmlrpc.client
 import threading
+import queue
 import time
 import os
 import random
-import socket
 import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Configurações
+# -------------------------
+# CONFIGURAÇÕES GLOBAIS
+# -------------------------
 CHUNK_SIZE = 1024 * 1024  # 1MB
 PORT = random.randint(10000, 60000)
 exit_flag = threading.Event()
 
-# Substitua pelo IP da máquina onde o tracker está rodando
-TRACKER_IP = '192.168.15.166'  # <-- Alterar para o IP real do Tracker
+# Atualize com o endereço IP (e porta) do Tracker na sua rede:
+TRACKER_ADDRESS = 'http://192.168.15.166:9000'  # <-- ALTERE conforme necessário
+
+def get_local_ip():
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # Conecta a um servidor público para obter o IP da interface usada
+        s.connect(('8.8.8.8', 80))
+        ip = s.getsockname()[0]
+    except Exception:
+        ip = '127.0.0.1'
+    finally:
+        s.close()
+    return ip
 
 def calculate_checksum(data):
-    """ Calcula o checksum SHA-256 de um bloco de dados """
     return hashlib.sha256(data).hexdigest()
 
 def compute_file_checksum(file_name):
-    """ Calcula o checksum SHA-256 de um arquivo inteiro """
     with open(file_name, "rb") as f:
         data = f.read()
     return calculate_checksum(data)
 
 def split_file(file_name):
-    """
-    Divide um arquivo em chunks de 1MB, calcula seus checksums e atribui um identificador único para cada bloco.
-    Cada chunk é identificado por um número sequencial (index) utilizado também no nome do arquivo do chunk.
-    Retorna uma lista de tuplas: (chunk_id, chunk_name, checksum)
-    """
     chunks = []
     if not os.path.exists(file_name):
         return chunks
-
     with open(file_name, "rb") as f:
         index = 0
         while True:
@@ -48,11 +55,9 @@ def split_file(file_name):
                 chunk_file.write(chunk)
             chunks.append((index, chunk_name, checksum))
             index += 1
-    
     return chunks
 
 def send_chunk(chunk_name):
-    """ Envia um chunk específico para outro peer """
     try:
         with open(chunk_name, "rb") as f:
             data = f.read()
@@ -63,19 +68,13 @@ def send_chunk(chunk_name):
         return f"Erro: {e}"
 
 def get_files():
-    """
-    Lista os arquivos .txt disponíveis no diretório do peer,
-    excluindo os arquivos de chunk (que contêm '.chunk' no nome).
-    """
     return [f for f in os.listdir() if os.path.isfile(f) and f.endswith(".txt") and ".chunk" not in f]
 
 def receive_message(message, from_peer):
-    """ Recebe mensagens de outro peer e as exibe """
     print(f"\n{from_peer}: {message}")
     return True
 
 def send_message(peer_name, peer_address, sender_name):
-    """ Envia uma mensagem para outro peer """
     try:
         with xmlrpc.client.ServerProxy(peer_address) as peer_proxy:
             while not exit_flag.is_set():
@@ -87,37 +86,7 @@ def send_message(peer_name, peer_address, sender_name):
     except Exception as e:
         print(f"Erro ao conversar com {peer_name}: {e}")
 
-def download_chunk(peer_name, peer_address, chunk_name, expected_checksum=None):
-    """
-    Faz o download de um chunk de outro peer.
-    Se expected_checksum for informado, verifica a integridade do bloco baixado.
-    """
-    try:
-        with xmlrpc.client.ServerProxy(peer_address) as peer_proxy:
-            response = peer_proxy.send_chunk(chunk_name)
-            if isinstance(response, xmlrpc.client.Binary):
-                data = response.data
-                if expected_checksum:
-                    downloaded_checksum = calculate_checksum(data)
-                    if downloaded_checksum != expected_checksum:
-                        print(f"Erro: Checksum do chunk '{chunk_name}' não confere.")
-                        return False
-                with open(chunk_name, "wb") as f:
-                    f.write(data)
-                print(f"Chunk '{chunk_name}' baixado com sucesso de {peer_name}.")
-                return True
-            else:
-                print(response)
-                return False
-    except Exception as e:
-        print(f"Erro ao baixar chunk de {peer_name}: {e}")
-        return False
-
 def assemble_file(original_file_name, output_file=None):
-    """
-    Reconstroi o arquivo original a partir dos seus chunks.
-    Procura por arquivos no formato '{original_file_name}.chunkX' e os une na ordem.
-    """
     if output_file is None:
         output_file = f"{original_file_name}.assembled"
     index = 0
@@ -131,179 +100,306 @@ def assemble_file(original_file_name, output_file=None):
             index += 1
     print(f"Arquivo reassemblado como {output_file}.")
 
-def list_files_from_peers(proxy):
-    """ Lista arquivos .txt disponíveis nos peers conectados """
-    peers = proxy.list_clients()
-    if not peers:
-        print("Nenhum peer disponível.")
-        return
-    print("\nPeers conectados e arquivos disponíveis:")
-    for peer_name, peer_address in peers.items():
-        try:
-            with xmlrpc.client.ServerProxy(peer_address) as peer_proxy:
-                files = peer_proxy.get_files()
-                print(f"{peer_name}: {files}")
-        except Exception as e:
-            print(f"Não foi possível obter arquivos de {peer_name}: {e}")
-
 def register_chunks(proxy, peer_name, file_name, chunks, file_checksum=None):
-    """
-    Registra os chunks de um arquivo no tracker.
-    Cada chunk é uma tupla (chunk_id, chunk_name, checksum).
-    O checksum final do arquivo (se calculado) também é enviado.
-    """
-    proxy.register_chunks(peer_name, file_name, chunks, file_checksum)
-    print(f"Chunks do arquivo '{file_name}' registrados no tracker (por {peer_name}).")
+    try:
+        proxy.register_chunks(peer_name, file_name, chunks, file_checksum)
+        print(f"Chunks do arquivo '{file_name}' registrados no tracker (por {peer_name}).")
+    except Exception as e:
+        print(f"Erro ao registrar chunks: {e}")
 
 def share_file(file_name, proxy, peer_name):
-    """
-    Compartilha um arquivo .txt específico: quebra-o em chunks, calcula seu checksum final
-    e registra os dados no tracker.
-    """
     if not os.path.exists(file_name):
         print(f"Arquivo '{file_name}' não encontrado.")
         return
     if not file_name.endswith(".txt"):
         print("Apenas arquivos com extensão .txt podem ser compartilhados.")
         return
-    file_checksum = compute_file_checksum(file_name)
-    chunks = split_file(file_name)
-    if chunks:
-        register_chunks(proxy, peer_name, file_name, chunks, file_checksum)
-        print(f"Arquivo '{file_name}' compartilhado com sucesso.")
-    else:
-        print("Nenhum chunk foi criado.")
+    try:
+        file_checksum = compute_file_checksum(file_name)
+        chunks = split_file(file_name)
+        if chunks:
+            register_chunks(proxy, peer_name, file_name, chunks, file_checksum)
+            print(f"Arquivo '{file_name}' compartilhado com sucesso.")
+        else:
+            print("Nenhum chunk foi criado.")
+    except Exception as e:
+        print(f"Erro ao compartilhar arquivo: {e}")
 
 def share_all_txt_files(proxy, peer_name):
-    """
-    Percorre todos os arquivos .txt do diretório (exceto chunks),
-    quebra cada um em chunks e os registra no tracker.
-    """
     files = get_files()
     if not files:
         print("Nenhum arquivo .txt encontrado para compartilhar automaticamente.")
     for file in files:
-        file_checksum = compute_file_checksum(file)
-        chunks = split_file(file)
-        if chunks:
-            register_chunks(proxy, peer_name, file, chunks, file_checksum)
+        try:
+            file_checksum = compute_file_checksum(file)
+            chunks = split_file(file)
+            if chunks:
+                register_chunks(proxy, peer_name, file, chunks, file_checksum)
+        except Exception as e:
+            print(f"Erro ao compartilhar {file}: {e}")
+
+def list_files_from_peers(proxy):
+    try:
+        peers = proxy.list_clients()
+        if not peers:
+            print("Nenhum peer disponível.")
+            return
+        print("\nPeers conectados e arquivos disponíveis:")
+        for peer_name, peer_address in peers.items():
+            try:
+                with xmlrpc.client.ServerProxy(peer_address) as peer_proxy:
+                    files = peer_proxy.get_files()
+                    print(f"{peer_name}: {files}")
+            except Exception as e:
+                print(f"Não foi possível obter arquivos de {peer_name}: {e}")
+    except Exception as e:
+        print(f"Erro ao listar peers: {e}")
+
+# -------------------------
+# CONEXÕES PERSISTENTES
+# -------------------------
+class PeerConnectionPool:
+    def __init__(self, max_connections=10):
+        self.pool = {}
+        self.max_connections = max_connections
+        self.lock = threading.Lock()
+    def get_connection(self, peer_address):
+        with self.lock:
+            if peer_address not in self.pool:
+                transport = xmlrpc.client.Transport(use_datetime=True)
+                transport.timeout = 30
+                self.pool[peer_address] = xmlrpc.client.ServerProxy(
+                    peer_address, 
+                    transport=transport,
+                    allow_none=True
+                )
+            return self.pool[peer_address]
+
+class TrackerProxy:
+    def __init__(self, address):
+        self.address = address
+        self.semaphore = threading.Semaphore(1)
+        self.transport = xmlrpc.client.Transport(use_datetime=True)
+        self.transport.timeout = 30
+    def get_proxy(self):
+        return xmlrpc.client.ServerProxy(self.address, 
+                                         transport=self.transport,
+                                         allow_none=True)
+    def execute(self, method_name, *args):
+        with self.semaphore:
+            proxy = self.get_proxy()
+            method = getattr(proxy, method_name)
+            return method(*args)
+
+# -------------------------
+# DOWNLOAD DO ARQUIVO COM CONEXÕES PARALELAS
+# -------------------------
+def count_local_chunks():
+    return len([f for f in os.listdir() if '.chunk' in f])
+
+def calculate_max_connections():
+    num_chunks = count_local_chunks()
+    if num_chunks <= 2:
+        return 1
+    elif num_chunks <= 5:
+        return 2
+    elif num_chunks <= 7:
+        return 3
+    else:
+        return 4
 
 def download_file(proxy, local_peer_name):
-    """
-    Realiza o download completo de um arquivo:
-      - O usuário informa o nome do arquivo a ser baixado.
-      - São consultados todos os chunks do arquivo no tracker.
-      - O usuário informa quantas conexões paralelas deseja usar.
-      - Cada chunk é baixado em paralelo e, assim que for baixado com sucesso,
-        ele é imediatamente registrado no tracker para que este peer passe a ser seeder daquele chunk.
-      - Ao final, o arquivo é reagrupado, seu checksum é verificado e, se completo,
-        todos os chunks são registrados novamente.
-    """
-    file_to_get = input("Digite o nome do arquivo que deseja baixar: ").strip()
-    chunks = proxy.get_file_chunks(file_to_get)
-    if not chunks:
-        print("Nenhum chunk encontrado para esse arquivo.")
-        return
-    final_checksum = proxy.get_file_checksum(file_to_get)
-    if final_checksum == "Checksum não encontrado.":
-        print("Checksum final do arquivo não encontrado.")
-        return
     try:
-        num_connections = int(input("Digite o número de conexões paralelas: "))
-    except ValueError:
-        print("Valor inválido para conexões.")
-        return
-
-    # Ordena os chunks pela ordem do chunk_id (ou 0 se None)
-    chunks.sort(key=lambda x: x[1] if x[1] is not None else 0)
-
-    def download_individual_chunk(chunk_info):
-        peer, chunk_id, chunk_name, chunk_checksum = chunk_info
-        peer_addr = proxy.get_peer_address(peer)
-        if peer_addr == "Peer não encontrado.":
-            print(f"Peer {peer} não encontrado para chunk {chunk_name}.")
-            return False
-        result = download_chunk(peer, peer_addr, chunk_name, chunk_checksum)
-        if result:
-            # Assim que o chunk for baixado, registra-o no tracker para que este peer passe a oferecê-lo
-            proxy.register_chunks(local_peer_name, file_to_get, [(chunk_id, chunk_name, chunk_checksum)], final_checksum)
-            return True
-        return False
-
-    print("Iniciando download dos chunks...")
-    with ThreadPoolExecutor(max_workers=num_connections) as executor:
-        futures = {executor.submit(download_individual_chunk, c): c for c in chunks}
-        for future in as_completed(futures):
-            c = futures[future]
+        file_to_get = input("Digite o nome do arquivo que deseja baixar: ").strip()
+        max_connections = calculate_max_connections()
+        print(f"\nBaseado na sua contribuição ({count_local_chunks()} chunks), " 
+              f"você pode usar até {max_connections} conexões paralelas.")
+        while True:
             try:
-                result = future.result()
-                if not result:
-                    print(f"Falha ao baixar o chunk {c[2]}.")
-            except Exception as e:
-                print(f"Erro ao baixar chunk {c[2]}: {e}")
-
-    print("Todos os chunks foram baixados. Reagrupando o arquivo...")
-    assemble_file(file_to_get)
-    assembled_file = f"{file_to_get}.assembled"
-    if not os.path.exists(assembled_file):
-        print("Erro: arquivo reassemblado não encontrado.")
-        return
-    with open(assembled_file, "rb") as f:
-        assembled_data = f.read()
-    assembled_checksum = calculate_checksum(assembled_data)
-    if assembled_checksum == final_checksum:
-        print("Arquivo baixado com sucesso e o checksum confere!")
-        if not os.path.exists(file_to_get):
-            os.rename(assembled_file, file_to_get)
+                num_connections = int(input(f"Digite o número de conexões paralelas desejado (1 até {max_connections}): "))
+                if 1 <= num_connections <= max_connections:
+                    break
+                else:
+                    print(f"Por favor, escolha um número entre 1 e {max_connections}.")
+            except ValueError:
+                print(f"Entrada inválida. Digite um número entre 1 e {max_connections}.")
+        tracker = TrackerProxy(TRACKER_ADDRESS)
+        chunks = tracker.execute('get_file_chunks', file_to_get)
+        if not chunks:
+            print(f"Nenhum chunk encontrado para o arquivo '{file_to_get}'.")
+            return
+        final_checksum = tracker.execute('get_file_checksum', file_to_get)
+        if final_checksum == "Checksum não encontrado.":
+            print(f"Checksum final do arquivo '{file_to_get}' não encontrado.")
+            return
+        chunk_to_peers = {}
+        for peer, chunk_id, chunk_name, chunk_checksum in chunks:
+            if peer != local_peer_name:
+                if not os.path.exists(chunk_name):
+                    if chunk_name not in chunk_to_peers:
+                        chunk_to_peers[chunk_name] = []
+                    chunk_to_peers[chunk_name].append((peer, chunk_id, chunk_name, chunk_checksum))
+        if not chunk_to_peers:
+            print(f"Não há chunks para baixar do arquivo '{file_to_get}'. Talvez você já tenha todos os chunks.")
+            return
+        chunks_to_download = []
+        for chunk_name, peer_list in chunk_to_peers.items():
+            selected_peer = random.choice(peer_list)
+            chunks_to_download.append(selected_peer)
+        random.shuffle(chunks_to_download)
+        start_time = time.time()
+        downloaded_chunks = set()
+        in_progress_chunks = set()
+        chunk_locks = {chunk[2]: threading.Lock() for chunk in chunks_to_download}
+        downloaded_lock = threading.Lock()
+        in_progress_lock = threading.Lock()
+        active_workers = threading.Semaphore(num_connections)
+        chunks_queue = queue.Queue()
+        for chunk in chunks_to_download:
+            chunks_queue.put(chunk)
+        failed_chunks = queue.Queue()
+        def worker():
+            while True:
+                with active_workers:
+                    try:
+                        chunk_info = chunks_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    peer, chunk_id, chunk_name, chunk_checksum = chunk_info
+                    with in_progress_lock:
+                        if chunk_name in in_progress_chunks:
+                            chunks_queue.task_done()
+                            continue
+                        in_progress_chunks.add(chunk_name)
+                    try:
+                        with downloaded_lock:
+                            if chunk_name in downloaded_chunks:
+                                chunks_queue.task_done()
+                                continue
+                        peer_addr = tracker.execute('get_peer_address', peer)
+                        if peer_addr == "Peer não encontrado.":
+                            failed_chunks.put((chunk_name, "Peer não encontrado"))
+                            continue
+                        peer_proxy = PeerConnectionPool().get_connection(peer_addr)
+                        print(f"Baixando {chunk_name} de {peer}...")
+                        response = peer_proxy.send_chunk(chunk_name)
+                        if isinstance(response, xmlrpc.client.Binary):
+                            data = response.data
+                            if chunk_checksum:
+                                downloaded_checksum = calculate_checksum(data)
+                                if downloaded_checksum != chunk_checksum:
+                                    failed_chunks.put((chunk_name, "Checksum inválido"))
+                                    continue
+                            with chunk_locks[chunk_name]:
+                                with open(chunk_name, "wb") as f:
+                                    f.write(data)
+                            tracker.execute('register_chunks', local_peer_name, file_to_get,
+                                         [(chunk_id, chunk_name, chunk_checksum)],
+                                         final_checksum)
+                            with downloaded_lock:
+                                downloaded_chunks.add(chunk_name)
+                        else:
+                            failed_chunks.put((chunk_name, response))
+                    except Exception as e:
+                        failed_chunks.put((chunk_name, str(e)))
+                    finally:
+                        with in_progress_lock:
+                            in_progress_chunks.discard(chunk_name)
+                        chunks_queue.task_done()
+        threads = []
+        for _ in range(num_connections):
+            thread = threading.Thread(target=worker)
+            thread.daemon = True
+            thread.start()
+            threads.append(thread)
+        chunks_queue.join()
+        end_time = time.time()
+        duration = end_time - start_time
+        if not failed_chunks.empty():
+            print("\nFalhas no download:")
+            while not failed_chunks.empty():
+                chunk_name, error = failed_chunks.get()
+                print(f"- {chunk_name}: {error}")
+            return
+        print("\nReagrupando o arquivo...")
+        assemble_file(file_to_get)
+        assembled_file = f"{file_to_get}.assembled"
+        with open(assembled_file, "rb") as f:
+            assembled_checksum = calculate_checksum(f.read())
+        if assembled_checksum == final_checksum:
+            print("Arquivo baixado com sucesso e checksum verificado!")
+            if not os.path.exists(file_to_get):
+                os.rename(assembled_file, file_to_get)
+            else:
+                os.remove(assembled_file)
+            local_chunks = split_file(file_to_get)
+            tracker.execute('register_chunks', local_peer_name, file_to_get, local_chunks, final_checksum)
         else:
+            print("Erro: checksum do arquivo final não confere!")
             os.remove(assembled_file)
-        local_chunks = split_file(file_to_get)
-        register_chunks(proxy, local_peer_name, file_to_get, local_chunks, final_checksum)
-    else:
-        print("O checksum do arquivo reagrupado não confere!")
+        print(f"\nTempo de transferência para {num_connections} conexões: {duration:.2f} segundos")
+    except Exception as e:
+        print(f"Erro durante o download: {e}")
 
-def get_peer_ip():
-    """ Retorna o IP local da máquina """
-    return socket.gethostbyname(socket.gethostname())
+# -------------------------
+# HEARTBEAT E CONEXÃO COM O TRACKER
+# -------------------------
+def send_heartbeat(proxy, name):
+    failures = 0
+    max_failures = 3
+    while not exit_flag.is_set():
+        try:
+            transport = xmlrpc.client.Transport(use_datetime=True)
+            transport.timeout = 10
+            with xmlrpc.client.ServerProxy(TRACKER_ADDRESS, 
+                                         transport=transport,
+                                         allow_none=True) as temp_proxy:
+                temp_proxy.heartbeat(name)
+                failures = 0
+                time.sleep(5)
+        except Exception as e:
+            failures += 1
+            if failures >= max_failures:
+                print(f"Perdeu conexão com o tracker após {failures} tentativas")
+                exit_flag.set()
+                break
+            time.sleep(2)
 
 def connect_to_tracker(name):
-    """ Conecta ao tracker e registra o peer """
-    server_address = f'http://{TRACKER_IP}:9000'
+    transport = xmlrpc.client.Transport(use_datetime=True)
+    transport.timeout = 10
     try:
-        with xmlrpc.client.ServerProxy(server_address) as proxy:
-            local_ip = get_peer_ip()  # Obtém o IP real da máquina
-            response = proxy.register(name, f"http://{local_ip}:{PORT}")
-            if response.startswith("Error:"):
-                print(response)
-                return False
+        proxy = xmlrpc.client.ServerProxy(TRACKER_ADDRESS, 
+                                        transport=transport,
+                                        allow_none=True)
+        local_ip = get_local_ip()
+        response = proxy.register(name, f"http://{local_ip}:{PORT}")
+        if response.startswith("Error:"):
             print(response)
-
-            # Compartilha automaticamente todos os arquivos .txt do diretório
-            share_all_txt_files(proxy, name)
-
-            def send_heartbeat():
-                while not exit_flag.is_set():
-                    time.sleep(5)
-                    try:
-                        proxy.heartbeat(name)
-                    except Exception as e:
-                        print(f"Erro ao enviar heartbeat: {e}")
-                        break
-            threading.Thread(target=send_heartbeat, daemon=True).start()
-
-            def receive_requests():
-                # Bind no IP 0.0.0.0 para permitir conexões externas
-                server = SimpleXMLRPCServer(('0.0.0.0', PORT), allow_none=True)
-                server.register_function(send_chunk, 'send_chunk')
-                server.register_function(get_files, 'get_files')
-                server.register_function(receive_message, 'receive_message')
-                server.register_function(get_peer_ip, 'get_peer_ip')
-                print(f"Peer iniciado no endereço http://{local_ip}:{PORT}.")
-                server.serve_forever()
-            threading.Thread(target=receive_requests, daemon=True).start()
-
-            # Menu interativo
-            while not exit_flag.is_set():
+            return False
+        print(response)
+        # Compartilha arquivos existentes
+        share_all_txt_files(proxy, name)
+        # Inicia thread de heartbeat
+        heartbeat_thread = threading.Thread(target=send_heartbeat, 
+                                         args=(proxy, name),
+                                         daemon=True)
+        heartbeat_thread.start()
+        # Inicia servidor local para receber requisições de outros peers
+        server = SimpleXMLRPCServer(('0.0.0.0', PORT), 
+                                  allow_none=True,
+                                  logRequests=False)
+        server.timeout = 10
+        server.register_function(send_chunk, 'send_chunk')
+        server.register_function(get_files, 'get_files')
+        server.register_function(receive_message, 'receive_message')
+        server_thread = threading.Thread(target=server.serve_forever, 
+                                      daemon=True)
+        server_thread.start()
+        print(f"Peer iniciado no endereço http://{local_ip}:{PORT}")
+        # Menu interativo
+        while not exit_flag.is_set():
+            try:
                 command = input(
                     "\nDigite 'list' para ver peers, 'chunks' para ver blocos de um arquivo,\n"
                     "'chat' para conversar, 'get' para baixar um arquivo completo,\n"
@@ -332,7 +428,7 @@ def connect_to_tracker(name):
                 elif command == 'get':
                     download_file(proxy, name)
                 elif command == 'assemble':
-                    original_file = input("Digite o nome original do arquivo (sem a extensão de chunk): ").strip()
+                    original_file = input("Digite o nome original do arquivo: ").strip()
                     assemble_file(original_file)
                 elif command == 'share':
                     file_to_share = input("Digite o nome do arquivo .txt para compartilhar: ").strip()
@@ -343,7 +439,13 @@ def connect_to_tracker(name):
                     break
                 else:
                     print("Comando inválido. Tente novamente.")
-            return True
+            except xmlrpc.client.Error as e:
+                print(f"Erro de comunicação: {e}")
+                time.sleep(1)
+            except Exception as e:
+                print(f"Erro: {e}")
+                time.sleep(1)
+        return True
     except Exception as e:
         print(f"Erro ao conectar ao tracker: {e}")
         return False
